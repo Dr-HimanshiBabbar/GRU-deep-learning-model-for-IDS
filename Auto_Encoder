@@ -1,3 +1,5 @@
+##Pre-Processing
+
 import os
 
 import pandas as pd
@@ -177,3 +179,140 @@ def to_machine_readable(data_frame, service_list, flag_list, test=False, attack=
             print('Saving file:', os.path.join('..', 'hdf5', 'test.hdf5'))
             hdf['x'] = df_final.values[:]
             hdf['y'] = df_label[:]
+
+## Main file
+from preprocess import *
+
+print('NSL-KDD dataset preprocessor', end='\n\n')
+service_list = get_service_list(dirname='list', filename='service.txt')
+flag_list = get_flag_list(dirname='list', filename='flag.txt')
+
+# 100% normal training data
+df_train = get_data_frame(dirname='dataset', filename='KDDTrain+.txt')
+df_train = to_numeric(df_train, service_list, flag_list)
+to_machine_readable(df_train, service_list, flag_list)
+print('Train data preprocess finished!', end='\n\n')
+
+# 1% attack mixed training data
+df_train_atk = get_data_frame(dirname='dataset', filename='KDDTrain+.txt')
+df_train_atk = to_numeric(df_train_atk, service_list, flag_list, attack=True)
+to_machine_readable(df_train_atk, service_list, flag_list, attack=True)
+print('Train data with attack preprocess finished!', end='\n\n')
+
+# test data
+df_test = get_data_frame(dirname='dataset', filename='KDDTest+.txt')
+df_test = to_numeric(df_test, service_list, flag_list, test=True)
+to_machine_readable(df_test, service_list, flag_list, test=True)
+print('Test data preprocess finished!', end='\n\n')
+
+##Model
+Import required packages
+import os
+import itertools
+
+import numpy as np
+import pandas as pd
+import h5py
+
+from keras.layers import Input, Dense, LeakyReLU, Dropout
+from keras.models import Model, load_model
+from keras.callbacks.callbacks import EarlyStopping, ModelCheckpoint
+
+import matplotlib.pyplot as plt
+
+Dataset import function
+
+def get_dataset(dirname=os.path.join('..', 'hdf5'), filename=None, tagname=None):
+    if filename is None or tagname is None:
+        raise ValueError('File name and tag name should be set.')
+    with h5py.File(os.path.join(dirname, filename), 'r') as hdf:
+        return hdf[tagname][:]
+
+Autoencoder intialization function
+
+def get_autoencoder(loss_func):    
+    # input layer
+    inp = Input(shape=(114,)) # layer 1
+    
+    # encoding layers
+    enc = Dense(512)(inp) # layer 2
+    enc = Dropout(0.5)(enc)
+    enc = LeakyReLU(0.01)(enc)
+    enc = Dense(256)(enc) # layer 3
+    enc = Dropout(0.5)(enc)
+    enc = LeakyReLU(0.01)(enc)
+    enc = Dense(128)(enc) # layer 4
+    enc = Dropout(0.5)(enc)
+    enc = LeakyReLU(0.01)(enc)
+    
+    # bottleneck layer
+    mid = Dense(64)(enc) # layer 5
+    mid = Dropout(0.5)(mid)
+     mid = LeakyReLU(0.01)(mid)
+    
+    # decoding layers
+    dec = Dense(128)(mid) # layer 6
+    dec = Dropout(0.5)(dec)
+    dec = LeakyReLU(0.01)(dec)
+    dec = Dense(256)(dec) # layer 7
+    dec = Dropout(0.5)(dec)
+    dec = LeakyReLU(0.01)(dec)
+    dec = Dense(512)(dec) # layer 8
+    dec = Dropout(0.5)(dec)
+    dec = LeakyReLU(0.01)(dec)
+    
+    # output layer
+    out = Dense(114, activation='sigmoid')(dec)
+    
+    # create new model
+    autoencoder = Model(inp, out)
+    autoencoder.compile(loss=loss_func, optimizer='rmsprop')
+    return autoencoder
+    
+   # Model summary
+get_autoencoder('categorical_crossentropy').summary()
+
+##Train function
+def train_and_save(loss_func, train_type, filename):
+    # get dataset
+    if train_type == 'normal':
+        x_train = get_dataset(filename='train_normal.hdf5', tagname='x')
+    elif train_type == 'mix':
+        x_train = get_dataset(filename='train_mix.hdf5', tagname='x')
+    else:
+        raise ValueError('Train type should be either normal or mix.')
+    x_val = get_dataset(filename='test.hdf5', tagname='x')
+    
+    # autoencoder initialization
+    autoencoder = get_autoencoder(loss_func)
+    
+    # set callbacks
+    es = EarlyStopping(patience=3, monitor='val_loss')
+    mc = ModelCheckpoint(os.path.join('save', filename), save_best_only=True)
+    
+    # train
+    history = autoencoder.fit(x_train, x_train, validation_data=(x_val, x_val),
+                    epochs=30, batch_size=64, callbacks=[es, mc])
+    print('Best model saved to', os.path.join('save', filename), end='\n\n')
+    
+    return history
+    
+    ##Start training
+    model_list = list()
+history_list = list()
+for loss_func, train_type in itertools.product(loss_func_list, train_type_list):
+    model_list.append('_'.join([loss_func, train_type]) + '.h5')
+    print('Training', model_list[-1], '...')
+    history = train_and_save(loss_func, train_type, model_list[-1])
+    history_list.append(history)
+    
+    fig, ax = plt.subplots(2, 2, figsize=(16, 10))
+for i, h in enumerate(history_list):
+    axx = ax[i%2][i//2]
+    axx.grid(linestyle='--')
+    axx.plot(h.history['loss'])
+    axx.plot(h.history['val_loss'])
+    axx.set_title(model_list[i][:-3])
+    axx.legend(['loss', 'val_loss'], loc='upper left')
+    axx.set_xlabel('Epoch')
+    axx.set_ylabel('Loss')
